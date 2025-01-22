@@ -130,8 +130,10 @@ func extractPodmanIdent() string {
 func startProxySSHDaemon() {
 	logFunctionName()
 	fmt.Println("## Starting SSH Proxy Daemon")
+	pid := os.Getpid()
+
 	localForward = getLocalForward()
-	sshConfig := fmt.Sprintf(`Host podman-proxy-ssh
+	sshConfig := fmt.Sprintf(`Host podman-proxy-ssh # pid %d
 	User %s
 	IdentitiesOnly=yes
 	StrictHostKeyChecking no
@@ -139,7 +141,11 @@ func startProxySSHDaemon() {
 	HostName %s
 	Port %s
 	IdentityFile %s
-	%s`, podmanUser, podmanHost, podmanPort, podmanIdent, localForward)
+	#RemoteForward  127.83.20.16:5005 10.83.20.16:5005
+	#RemoteForward  127.83.20.16:10022 10.83.20.16:10022
+	#RemoteForward  127.83.20.16:443 10.83.20.16:443
+
+	%s`, pid, podmanUser, podmanHost, podmanPort, podmanIdent, localForward)
 
 	currentSSHConfigSHA1 := calculateSHA1(sshConfig)
 
