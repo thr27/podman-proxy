@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"syscall"
 )
 
@@ -133,6 +134,7 @@ func startProxySSHDaemon() {
 	pid := os.Getpid()
 
 	localForward = getLocalForward()
+
 	sshConfig := fmt.Sprintf(`Host podman-proxy-ssh # pid %d
 	User %s
 	IdentitiesOnly=yes
@@ -150,6 +152,8 @@ func startProxySSHDaemon() {
 	currentSSHConfigSHA1 := calculateSHA1(sshConfig)
 
 	if currentSSHConfigSHA1 != prevSSHConfigSHA1 {
+		killProxySSHDaemon()
+
 		if err := os.WriteFile(sshConfigPodmanProxy, []byte(sshConfig), 0644); err != nil {
 			fmt.Println("Error writing SSH config:", err)
 			return
@@ -218,13 +222,22 @@ func getLocalForward() string {
 
 	containers := bytes.Split(output, []byte{'\n'})
 	for _, container := range containers {
+		localForward += fmt.Sprintf("# ContainerID %s \n", container)
 		if len(container) == 0 {
 			continue
 		}
 		portMappings := getPortMappings(string(container))
 		for _, mapping := range portMappings {
-			fmt.Printf("## port mapping: HostIp=%s, HostPort=%s\n", mapping.HostIp, mapping.HostPort) // Log the port mapping
-			localForward += fmt.Sprintf("LocalForward %s:%s %s:%s\n", mapping.HostIp, mapping.HostPort, mapping.HostIp, mapping.HostPort)
+			localForward += "# From ports ... \n"
+			fmt.Printf("## port mapping: LocalIp=%s, LocalPort=%s HostIp=%s, HostPort=%s\n", mapping.LocalIp, mapping.LocalPort, mapping.HostIp, mapping.HostPort) // Log the port mapping
+			localForward += fmt.Sprintf("LocalForward %s:%s %s:%s\n", mapping.LocalIp, mapping.LocalPort, mapping.HostIp, mapping.HostPort)
+		}
+
+		portMappings = getPortMappingFromLabels(string(container))
+		for _, mapping := range portMappings {
+			localForward += "# From labels ... \n"
+			fmt.Printf("## port mapping: LocalIp=%s, LocalPort=%s HostIp=%s, HostPort=%s\n", mapping.LocalIp, mapping.LocalPort, mapping.HostIp, mapping.HostPort) // Log the port mapping
+			localForward += fmt.Sprintf("LocalForward %s:%s %s:%s\n", mapping.LocalIp, mapping.LocalPort, mapping.HostIp, mapping.HostPort)
 		}
 	}
 	return localForward
@@ -245,17 +258,51 @@ func getPortMappings(containerID string) []PortMapping {
 	for _, match := range matches {
 		if len(match) == 3 {
 			portMappings = append(portMappings, PortMapping{
-				HostIp:   match[1],
-				HostPort: match[2],
+				LocalIp:   match[1],
+				LocalPort: match[2],
+				HostIp:    match[1],
+				HostPort:  match[2],
 			})
+		}
+	}
+	return portMappings
+}
+func getPortMappingFromLabels(containerID string) []PortMapping {
+	var portMappings []PortMapping
+	cmd := exec.Command("podman", "inspect", containerID, "--format", "{{ range  $key,$value := .Config.Labels }}{{ $key}}:{{ json $value }}\n{{end}}")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Println("Error inspecting container:", err)
+		return portMappings
+	}
+	lables := bytes.Split(output, []byte{'\n'})
+	for _, blabel := range lables {
+		label := string(blabel)
+		if strings.Contains(label, "podman-proxy-remote-ports:") {
+			// Use regex to extract HostIp and HostPort
+			re := regexp.MustCompile(`(\d+\.\d+\.\d+\.\d+):(\d+):(\d+\.\d+\.\d+\.\d+):(\d+)`)
+			matches := re.FindAllStringSubmatch(label, -1)
+
+			for _, match := range matches {
+				if len(match) == 5 {
+					portMappings = append(portMappings, PortMapping{
+						LocalIp:   match[1],
+						LocalPort: match[2],
+						HostIp:    match[3],
+						HostPort:  match[4],
+					})
+				}
+			}
 		}
 	}
 	return portMappings
 }
 
 type PortMapping struct {
-	HostIp   string
-	HostPort string
+	LocalIp   string
+	LocalPort string
+	HostIp    string
+	HostPort  string
 }
 
 func killProxySSHDaemon() {
@@ -303,6 +350,6 @@ func monitorPodmanStartStopEvents() {
 func restartProxySSHDaemon() {
 	logFunctionName()
 	fmt.Println("## Restarting SSH proxy daemon...")
-	killProxySSHDaemon()
+
 	startProxySSHDaemon()
 }
